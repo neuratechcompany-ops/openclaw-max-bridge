@@ -1,0 +1,14 @@
+[Unit]
+Description=MAX ↔ OpenClaw Bridge
+After=network.target
+
+[Service]
+Type=simple
+User=aurum
+WorkingDirectory=/opt/max-bridge
+ExecStart=/usr/bin/python3 -u /opt/max-bridge/max-bridge.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

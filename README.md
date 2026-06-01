@@ -1,299 +1,174 @@
-# OpenClaw ↔ MAX Messenger Bridge
+# 🤖 Твой AI-ассистент в мессенджере MAX
 
-Подключи своего OpenClaw-ассистента к мессенджеру MAX.
-Два варианта: **Python-мост** (рекомендуемый — проще и надёжнее) и **n8n workflow** (для фанатов визуального редактора).
+Хочешь чтобы в MAX у тебя был свой личный AI-помощник? Который отвечает вдумчиво, помнит контекст, помогает с задачами — прямо как человек?
 
----
-
-## Что нужно
-
-- OpenClaw Gateway (установлен и запущен)
-- Бот в MAX (создан через business.max.ru)
-- Python 3 + `requests`
+Этот репозиторий — готовый мост между **OpenClaw** (твой AI) и **мессенджером MAX**.
 
 ---
 
-# Часть 1: Создать бота в MAX
+## 📦 Что тут лежит
 
-1. Зайти на [business.max.ru](https://business.max.ru/self)
-2. Раздел «Чат-боты» → «Создать бота»
-3. Заполнить имя, описание, аватар → отправить на модерацию
-4. После модерации (статус «Создан») → «Интеграция» → «Получить токен»
-5. **Скопировать токен** — он понадобится для моста
-
-Бот доступен в MAX:
-- Поиск по нику `@username_бота` в приложении
-- Прямая ссылка: `https://max.ru/@username_бота`
+| Файл | Для кого |
+|---|---|
+| `max-bridge.py` | Python-скрипт — запустил и забыл, бот живёт 24/7 |
+| `max-bridge-workflow.json` | Для тех кто пользуется n8n — визуальный конструктор |
+| `README.md` | Этот гайд — читаешь и делаешь |
 
 ---
 
-# Часть 2: Включить HTTP API в OpenClaw
+## 🚀 Быстрый старт (для обычных людей)
 
-В файле `~/.openclaw/openclaw.json` добавить блок `gateway.http`:
+Вот что нужно чтобы твой AI заговорил в MAX:
 
-```json5
-{
-  "gateway": {
-    // ... остальной конфиг ...
-    "http": {
-      "endpoints": {
-        "chatCompletions": { "enabled": true }
-      }
-    }
-  }
-}
-```
+### 1. Получи токены (это как пароли для связи)
 
-Перезапустить Gateway:
-```bash
-openclaw gateway restart
-```
+- **Токен MAX** — создай бота на [business.max.ru](https://business.max.ru/self) → «Чат-боты» → скопируй токен в разделе «Интеграция»
+- **Токен OpenClaw** — лежит в файле `~/.openclaw/openclaw.json` в поле `gateway.auth.token`
 
-Запомнить Gateway-токен из того же конфига — поле `gateway.auth.token`.
+### 2. Вставь токены в скрипт
 
-Проверить что API работает:
-```bash
-curl -s http://localhost:18789/v1/models \
-  -H "Authorization: Bearer ВАШ_ТОКЕН"
-```
-
----
-
-# Часть 3: Python-мост (быстрый и надёжный)
-
-## 3.1 Скопировать и настроить
-
-```bash
-mkdir -p /opt/max-bridge
-cp max-bridge.py /opt/max-bridge/
-```
-
-Отредактировать токены в начале скрипта:
+Открой `max-bridge.py`, найди в начале:
 
 ```python
-MAX_TOKEN = "f9L…то…акса"
-OC_TOKEN  = "c48…ga…claw"
+MAX_TOKEN = "your_m…here"    # ← вставь сюда токен от MAX
+OC_TOKEN  = "your_o…here"    # ← вставь сюда токен OpenClaw
 ```
 
-### ⚡ Важно: выбор модели
-
-По умолчанию бридж использует **DeepSeek v4 Flash** — быстро (5-15 сек). Если нужен более умный, но медленный ответ — замени в скрипте:
-
-```python
-# Быстро (рекомендуется для чат-бота):
-headers["x-openclaw-model"] = "deepseek/deepseek-v4-flash"
-
-# Умно, но медленно (~60 сек):
-headers["x-openclaw-model"] = "deepseek/deepseek-v4-pro"
-```
-
-## 3.2 systemd-сервис (автозапуск и защита от падений)
-
-Создать `/etc/systemd/system/max-bridge.service`:
-
-```ini
-[Unit]
-Description=MAX ↔ OpenClaw Bridge
-After=network.target
-
-[Service]
-Type=simple
-User=aurum
-WorkingDirectory=/opt/max-bridge
-ExecStart=/usr/bin/python3 -u /opt/max-bridge/max-bridge.py
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
+### 3. Запусти
 
 ```bash
-sudo systemctl daemon-reload
+python3 -u max-bridge.py
+```
+
+Или сразу как сервис (чтобы не падал и сам запускался при включении компа):
+
+```bash
+sudo cp max-bridge.service /etc/systemd/system/
 sudo systemctl enable --now max-bridge
 ```
 
-## 3.3 Управление
+### 4. Напиши боту в MAX
 
-```bash
-sudo systemctl status max-bridge      # состояние
-sudo journalctl -u max-bridge -f      # логи в реальном времени
-sudo systemctl restart max-bridge     # перезапуск
-sudo systemctl stop max-bridge        # остановить
-```
+Найди его по нику `@имя_твоего_бота` в поиске Макса и скажи «Привет».
 
-## 3.4 Что внутри (защита от падений)
-
-- **Retry до 3 раз** — OpenClaw API и MAX API
-- **Exponential backoff** — при ошибках сети ждёт дольше
-- **systemd Restart=always** — упал → через 10 сек поднялся
-- **Маркер-файл** — не теряет сообщения при перезапуске
-- **Индикатор «печатает»** — бот показывает typing пока думает
-- **Graceful degradation** — если OpenClaw упал, бот отвечает «попробуй позже»
+Всё. Он ответит.
 
 ---
 
-# Часть 4: Вариант с n8n (альтернатива)
+## 💬 Что умеет бот и как с ним общаться
 
-## 4.1 Установить n8n
+Бот — это не набор команд. Это **твой AI-ассистент**, который понимает обычную речь.
+
+**Спрашивай как человека:**
+
+- «Привет, что ты умеешь?»
+- «Напомни завтра в 10 утра проверить почту»
+- «Найди информацию про компанию Яндекс»
+- «Объясни простыми словами как работает блокчейн»
+- «Переведи этот текст на английский»
+- «Помоги разобраться с ошибкой в коде»
+
+**Не надо:**
+- ❌ Писать `/команды` или специальные слова
+- ❌ Объяснять кто ты (бот тебя знает)
+- ❌ Ждать мгновенного ответа — бот думает 5-15 секунд
+
+**Полезные штуки:**
+
+- Бот **помнит контекст** — можно ссылаться на предыдущие сообщения
+- Бот **понимает markdown** — ответы с форматированием
+- Если бот долго думает — он показывает «печатает...»
+- Если что-то пошло не так — бот скажет «попробуй позже», а не упадёт молча
+
+---
+
+## 🔗 Дай бота друзьям
+
+Ссылка на твоего бота:
+```
+https://max.ru/@имя_твоего_бота
+```
+
+Отправь другу — он нажмёт, откроется MAX и сразу чат с ботом.
+
+---
+
+## ⚙️ Тонкая настройка (для любопытных)
+
+### Быстрее или умнее?
+
+По умолчанию бот использует **быструю модель** (отвечает за 5-15 секунд). Если хочешь более глубокие ответы (но ждать до минуты) — замени в скрипте:
+
+```python
+# Быстро (по умолчанию):
+headers["x-openclaw-model"] = "deepseek/deepseek-v4-flash"
+
+# Умно (медленнее):
+headers["x-openclaw-model"] = "deepseek/deepseek-v4-pro"
+```
+
+### Если бот молчит
 
 ```bash
-npm install -g n8n
+# Проверь что скрипт запущен:
+sudo systemctl status max-bridge
+
+# Посмотри логи — что происходит прямо сейчас:
+sudo journalctl -u max-bridge -f
 ```
 
-## 4.2 Первый запуск и настройка владельца
+### n8n-версия
 
-```bash
-n8n start
+Если ты пользуешься n8n — импортируй `max-bridge-workflow.json`. Подробная инструкция ниже в техническом разделе.
+
+---
+
+## 🛠 Технические детали (для разработчиков)
+
+### Архитектура
+
+```
+Сообщение в MAX → MAX API (Long Polling)
+    → max-bridge.py (Python)
+    → OpenClaw Gateway (/v1/chat/completions)
+    → Ответ в MAX (POST /messages)
 ```
 
-Открыть `http://localhost:5678` → создать owner-аккаунт (email + пароль).
+### Надёжность
 
-⚠️ **Без этого шага API-ключи не работают и workflow не активируются через REST.**
+- **systemd Restart=always** — скрипт автоматически перезапускается при падении
+- **Retry до 3 раз** — если OpenClaw или MAX временно недоступны
+- **Exponential backoff** — при проблемах с сетью
+- **Маркер событий** — бот не теряет сообщения даже после перезапуска
+- **Индикатор печати** — показывает «typing» пока ждёт ответ от AI
 
-## 4.3 Создать API-ключ
+### MAX API
 
-В n8n UI: Settings → API Keys → Create API Key.
+База: `https://platform-api.max.ru`
+Auth: заголовок `Authorization: <токен>`
+Документация: [dev.max.ru/docs-api](https://dev.max.ru/docs-api)
 
-Или через базу (если UI недоступен):
-```bash
-sqlite3 ~/.n8n/database.sqlite "
-  INSERT INTO user_api_keys (id, userId, label, apiKey, createdAt, updatedAt, type)
-  SELECT '$(uuidgen)', id, 'bridge', 'n8n__' || lower(hex(randomblob(32))),
-         datetime('now'), datetime('now'), 'public-api'
-  FROM user WHERE role = 'global:owner';
-"
-```
+### Настройка n8n
 
-⚠️ **После вставки в базу нужно перезапустить n8n!**
+1. Установи n8n: `npm install -g n8n`
+2. Запусти: `n8n start`
+3. Открой `http://localhost:5678`, создай owner-аккаунт
+4. Settings → API Keys → создай ключ
+5. Импортируй workflow: `n8n import:workflow --input=max-bridge-workflow.json --userId=<ID>`
+6. Замени токены в workflow: найди `YOUR_MAX_BOT_TOKEN` и `YOUR_GATEWAY_TOKEN`
+7. Активируй через REST API (⚠️ активация через прямое редактирование базы НЕ работает)
 
-## 4.4 Импортировать workflow
-
-```bash
-n8n import:workflow \
-  --input=max-bridge-workflow.json \
-  --userId=ID_OWNER_ПОЛЬЗОВАТЕЛЯ
-```
-
-ID владельца:
-```bash
-sqlite3 ~/.n8n/database.sqlite "SELECT id, email FROM user;"
-```
-
-## 4.5 Заменить токены в workflow
-
-В `max-bridge-workflow.json` найти по `"name": "Authorization"` в HTTP Request нодах и заменить:
-
-- `f9LHod…yfL6` → свой MAX-токен (2 места)
-- `c48cbd…f970` → свой Gateway-токен
-
-## 4.6 Активировать
-
-**Через REST API:**
-```bash
-curl -s -X PATCH http://localhost:5678/rest/workflows/ID \
-  -H "X-N8N-API-KEY: ***" \
-  -H "Content-Type: application/json" \
-  -d '{"active": true}'
-```
-
-⚠️ **Активация через базу (UPDATE workflow_entity SET active=1) НЕ РАБОТАЕТ** — n8n не запускает scheduler.
-
-## 4.7 n8n systemd-сервис
-
-```ini
-[Unit]
-Description=n8n workflow automation
-After=network.target
-
-[Service]
-Type=simple
-User=aurum
-Environment=N8N_PORT=5678
-ExecStart=/home/aurum/.npm-global/bin/n8n start
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-## 4.8 Диагностика
+### Диагностика n8n
 
 ```bash
 curl http://localhost:5678/healthz
 
 curl -s http://localhost:5678/rest/workflows \
   -H "X-N8N-API-KEY: ***" | jq '.data[] | {id, name, active}'
-
-sqlite3 ~/.n8n/database.sqlite \
-  "SELECT status, startedAt FROM execution_entity ORDER BY startedAt DESC LIMIT 5;"
 ```
 
-⚠️ **Если active:true, но запусков нет:**
-1. n8n не перезапущен после активации
-2. Workflow активирован через базу (не работает!)
-3. Ошибка имён нод в connections
-
 ---
 
-# MAX API — шпаргалка
+## 📝 Лицензия
 
-| Метод | Путь | Описание |
-|---|---|---|
-| GET | `/me` | Информация о боте |
-| GET | `/updates?marker=` | События (long polling, timeout до 90с) |
-| POST | `/messages?user_id=` | Отправить сообщение |
-| POST | `/chats/actions` | Действие: typing, смена статуса |
-| POST | `/subscriptions` | Webhook-подписка (production) |
-
-База: `https://platform-api.max.ru`
-Auth: заголовок `Authorization: <токен_бота>`
-Документация: [dev.max.ru/docs-api](https://dev.max.ru/docs-api)
-
-## Формат /updates
-
-```json
-{
-  "updates": [
-    {
-      "update_type": "message_created",
-      "message": {
-        "sender": { "user_id": 123, "is_bot": false },
-        "body": { "text": "Привет!" }
-      }
-    }
-  ],
-  "marker": 1817
-}
-```
-
-Маркер нужно сохранять и передавать в следующем запросе.
-
----
-
-# Файлы
-
-| Файл | Для чего |
-|---|---|
-| `max-bridge.py` | Python-мост (основной, рекомендуемый) |
-| `max-bridge-workflow.json` | n8n workflow (альтернатива) |
-| `README.md` | Этот гайд |
-
----
-
-# Чеклист «бот не тупит»
-
-- [ ] MAX-токен работает → `curl https://platform-api.max.ru/me -H "Authorization: …"`
-- [ ] OpenClaw HTTP API включён → `curl localhost:18789/v1/models -H "Authorization: Bearer …"`
-- [ ] `max-bridge.service` active → `sudo systemctl status max-bridge`
-- [ ] В логах есть «Message from …» → `sudo journalctl -u max-bridge -f`
-- [ ] В логах есть «Reply: …» и «Sent to MAX ✓»
-- [ ] Модель Flash (быстро), а не Pro (долго)
-
-## Если бот молчит
-
-1. `sudo journalctl -u max-bridge -n 20` — смотреть ошибки
-2. `sudo systemctl restart max-bridge` — перезапустить мост
-3. Проверить что OpenClaw Gateway жив: `curl localhost:18789/health`
-4. Проверить что MAX API принимает: `curl https://platform-api.max.ru/me -H "Authorization: …"`
+MIT — делай что хочешь, мы будем рады если поможешь улучшить.
