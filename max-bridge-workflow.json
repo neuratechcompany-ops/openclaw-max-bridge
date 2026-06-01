@@ -1,0 +1,237 @@
+{
+  "name": "MAX Messenger Bridge",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Poll every 15s",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "position": [250, 300],
+      "typeVersion": 1.1
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://platform-api.max.ru/updates",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "YOUR_MAX_BOT_TOKEN"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "get-max-updates",
+      "name": "GET MAX Updates",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [450, 300],
+      "typeVersion": 4.2
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process MAX updates - extract message_created events\nconst updates = $input.item.json;\nconst messages = [];\n\n// Handle response: could be array or object with 'updates' field\nconst updateList = Array.isArray(updates) ? updates : (updates.updates || []);\n\nfor (const update of updateList) {\n  if (update.update_type === 'message_created' && update.message) {\n    const msg = update.message;\n    const sender = msg.sender || {};\n    const body = msg.body || {};\n    const recipient = msg.recipient || {};\n    \n    // Don't respond to own messages (bot messages)\n    if (sender.is_bot) continue;\n    \n    messages.push({\n      user_id: sender.user_id,\n      chat_id: recipient.chat_id,\n      text: body.text || '',\n      sender_name: sender.name || 'User'\n    });\n  }\n}\n\nreturn messages.map(m => ({ json: m }));"
+      },
+      "id": "process-updates",
+      "name": "Extract Messages",
+      "type": "n8n-nodes-base.code",
+      "position": [700, 300],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.user_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "exists",
+                "operation": "exists"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "has-messages",
+      "name": "Has Messages?",
+      "type": "n8n-nodes-base.if",
+      "position": [950, 300],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:18789/v1/chat/completions",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_GATEWAY_TOKEN"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-openclaw-session-key",
+              "value": "={{ 'max-user-' + $json.user_id }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": []
+        },
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"model\": \"openclaw\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"={{ $json.text }}\"\n    }\n  ],\n  \"max_tokens\": 1000\n}",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "openclaw-chat",
+      "name": "OpenClaw Chat",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [1200, 300],
+      "typeVersion": 4.2
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://platform-api.max.ru/messages?user_id={{ $('Extract Messages').item.json.user_id }}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "YOUR_MAX_BOT_TOKEN"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": []
+        },
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"text\": \"={{ $('OpenClaw Chat').item.json.choices[0].message.content }}\",\n  \"format\": \"markdown\"\n}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "string"
+            }
+          }
+        }
+      },
+      "id": "send-max",
+      "name": "Send to MAX",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [1450, 300],
+      "typeVersion": 4.2
+    }
+  ],
+  "connections": {
+    "Poll every 15s": {
+      "main": [
+        [
+          {
+            "node": "GET MAX Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET MAX Updates": {
+      "main": [
+        [
+          {
+            "node": "Extract Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Messages": {
+      "main": [
+        [
+          {
+            "node": "Has Messages?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Messages?": {
+      "main": [
+        [
+          {
+            "node": "OpenClaw Chat",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "OpenClaw Chat": {
+      "main": [
+        [
+          {
+            "node": "Send to MAX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "saveExecutionProgress": true,
+    "executionOrder": "v1",
+    "timezone": "Europe/Moscow"
+  },
+  "active": false,
+  "versionId": "1.0.0",
+  "id": "max-bridge-workflow"
+}
