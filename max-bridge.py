@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""MAX Messenger Bridge — Long Polling → OpenClaw → MAX
-Resilient: retries, auto-reconnect, never dies.
+"""MAX Messenger Bridge — Long Polling + Proactive Send → OpenClaw → MAX
+v2.0 — Resilient: retries, auto-reconnect, HTTP server for cron/proactive messages.
 """
 
-import json, time, requests, sys, os, traceback
+import json, time, requests, sys, os, traceback, threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ====== CONFIGURE THESE ======
-MAX_TOKEN = "your_max_bot_token_here"
-OC_TOKEN  = "your_openclaw_gateway_token_here"
+MAX_TOKEN = "f9LHodD0cOJ0V-P-QgKEC5ePe5jJi7-ReDH7_O3xHtVecNrWoC2xQtRTVlITc4It0RfsdqLjxU_lBnkOyfL6"
+OC_TOKEN  = "c48cbda39360e7bc4c721dda1d06caf05ef6f290b5c7f970"
+PROACTIVE_PORT = 18790  # HTTP server for cron/webhook → MAX delivery
 # =============================
 
 MAX_API = "https://platform-api.max.ru"
@@ -26,37 +28,123 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def load_marker():
+# ─── State management ─────────────────────────────────────────
+
+def load_state():
     try:
         with open(STATE_FILE) as f:
-            return json.load(f).get("marker")
+            return json.load(f)
     except:
-        return None
+        return {}
+
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+
+def load_marker():
+    return load_state().get("marker")
 
 
 def save_marker(marker):
-    with open(STATE_FILE, "w") as f:
-        json.dump({"marker": marker, "updated": time.time()}, f)
+    state = load_state()
+    state["marker"] = marker
+    state["updated"] = time.time()
+    save_state(state)
 
+
+# ─── Session → user_id mapping ────────────────────────────────
+
+def map_session_to_user(session_key, max_user_id):
+    """Remember which MAX user corresponds to which OpenClaw session."""
+    state = load_state()
+    if "session_map" not in state:
+        state["session_map"] = {}
+    state["session_map"][session_key] = {
+        "user_id": max_user_id,
+        "last_seen": time.time()
+    }
+    save_state(state)
+    log(f"  Mapped session {session_key} → user {max_user_id}")
+
+
+def get_user_by_session(session_key):
+    state = load_state()
+    return state.get("session_map", {}).get(session_key, {}).get("user_id")
+
+
+def get_user_by_any(identifier):
+    """Resolve user_id from either direct user_id or session_key."""
+    state = load_state()
+    smap = state.get("session_map", {})
+    # Direct match
+    for sk, v in smap.items():
+        if v["user_id"] == identifier:
+            return identifier
+    # Session key match
+    if identifier in smap:
+        return smap[identifier]["user_id"]
+    # Fallback: try all known users
+    if identifier == "__all__":
+        return list(set(v["user_id"] for v in smap.values()))
+    return identifier  # assume it's already a user_id
+
+
+# ─── MAX API ──────────────────────────────────────────────────
 
 def get_updates(marker):
     params = {"timeout": 25}
     if marker is not None:
         params["marker"] = marker
-    resp = requests.get(f"{MAX_API}/updates", headers=HEADERS_MAX, params=params, timeout=35)
+    resp = requests.get(f"{MAX_API}/updates", headers=HEADERS_MAX,
+                        params=params, timeout=35)
     resp.raise_for_status()
     return resp.json()
 
 
+def send_to_max(user_id, text):
+    """Send to MAX with retry. Returns True on success."""
+    payload = {"text": text, "format": "markdown"}
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                f"{MAX_API}/messages", params={"user_id": user_id},
+                headers=HEADERS_MAX, json=payload, timeout=15
+            )
+            if resp.status_code == 200:
+                return True
+            log(f"  MAX send returned {resp.status_code} (attempt {attempt+1}/3)")
+            if resp.status_code == 429:  # rate limit
+                time.sleep(5)
+        except Exception as e:
+            log(f"  MAX send error (attempt {attempt+1}/3): {e}")
+        time.sleep(3)
+    log(f"  MAX send FAILED after 3 attempts")
+    return False
+
+
+def send_typing(user_id):
+    try:
+        requests.post(f"{MAX_API}/chats/actions", params={"user_id": user_id},
+                      headers=HEADERS_MAX, json={"action": "typing"}, timeout=5)
+    except:
+        pass
+
+
+# ─── OpenClaw API ─────────────────────────────────────────────
+
 def send_to_openclaw(user_id, text):
     """Send to OpenClaw with retry on timeout."""
+    session_key = f"max-user-{user_id}"
+
     payload = {
         "model": "openclaw",
         "messages": [{"role": "user", "content": text}],
-        "max_tokens": 1000
+        "max_tokens": 2000
     }
     headers = dict(HEADERS_OC)
-    headers["x-openclaw-session-key"] = f"max-user-{user_id}"
+    headers["x-openclaw-session-key"] = session_key
     headers["x-openclaw-model"] = "deepseek/deepseek-v4-flash"
 
     for attempt in range(3):
@@ -73,35 +161,115 @@ def send_to_openclaw(user_id, text):
             raise
 
 
-def send_to_max(user_id, text):
-    """Send to MAX with retry."""
-    payload = {"text": text, "format": "markdown"}
-    for attempt in range(3):
+# ─── Proactive HTTP Server ────────────────────────────────────
+
+class ProactiveHandler(BaseHTTPRequestHandler):
+    """HTTP server that accepts push messages → delivers to MAX."""
+
+    def log_message(self, fmt, *args):
+        log(f"  HTTP: {fmt % args}")
+
+    def do_POST(self):
+        # Read body
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length)
+
         try:
-            resp = requests.post(
-                f"{MAX_API}/messages", params={"user_id": user_id},
-                headers=HEADERS_MAX, json=payload, timeout=15
-            )
-            if resp.status_code == 200:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            self.send_error(400, "Invalid JSON")
+            return
+
+        # ═══ OpenClaw webhook format (from cron delivery) ═══
+        # May contain: {"payload": {...}, "sessionKey": "max-user-xxx", ...}
+        text = None
+        user_id = None
+
+        # OpenClaw cron webhook format
+        if "sessionKey" in data and "payload" in data:
+            session_key = data["sessionKey"]
+            user_id = get_user_by_session(session_key)
+            payload = data["payload"]
+            if isinstance(payload, dict):
+                text = payload.get("text") or payload.get("message")
+            elif isinstance(payload, str):
+                text = payload
+
+        # Direct format: {"user_id": "...", "text": "..."}
+        if not text:
+            text = data.get("text") or data.get("message")
+        if not user_id:
+            user_id = data.get("user_id")
+            if user_id:
+                user_id = get_user_by_any(user_id)
+
+        # Broadcast to all known users
+        if not user_id and data.get("broadcast"):
+            state = load_state()
+            smap = state.get("session_map", {})
+            all_users = list(set(v["user_id"] for v in smap.values()))
+            if all_users and text:
+                log(f"  Broadcast to {len(all_users)} users: {text[:80]}")
+                for uid in all_users:
+                    send_to_max(uid, text)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "ok": True, "sent_to": len(all_users)
+                }).encode())
                 return
-            log(f"  MAX send returned {resp.status_code} (attempt {attempt+1}/3)")
-        except Exception as e:
-            log(f"  MAX send error (attempt {attempt+1}/3): {e}")
-        time.sleep(3)
-    log(f"  MAX send FAILED after 3 attempts")
+
+        if not user_id or not text:
+            self.send_error(400, "Missing user_id or text")
+            log(f"  Rejected request: user_id={user_id}, text={bool(text)}")
+            return
+
+        log(f"  Proactive send → user {user_id}: {text[:80]}")
+        ok = send_to_max(user_id, text)
+
+        self.send_response(200 if ok else 502)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"ok": ok}).encode())
+
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            state = load_state()
+            self.wfile.write(json.dumps({
+                "ok": True,
+                "users": len(state.get("session_map", {})),
+                "marker": state.get("marker")
+            }).encode())
+        elif self.path == "/users":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            state = load_state()
+            self.wfile.write(json.dumps(state.get("session_map", {})).encode())
+        else:
+            self.send_error(404)
 
 
-def send_typing(user_id):
-    try:
-        requests.post(f"{MAX_API}/chats/actions", params={"user_id": user_id},
-                      headers=HEADERS_MAX, json={"action": "typing"}, timeout=5)
-    except:
-        pass
+def start_proactive_server():
+    server = HTTPServer(("127.0.0.1", PROACTIVE_PORT), ProactiveHandler)
+    log(f"Proactive HTTP server on :{PROACTIVE_PORT} (cron → MAX gateway)")
+    server.serve_forever()
 
+
+# ─── Main Loop ────────────────────────────────────────────────
 
 def main():
-    log("MAX ↔ OpenClaw bridge STARTING")
+    log("MAX ↔ OpenClaw bridge v2.0 STARTING")
     log(f"OpenClaw: {OC_API}")
+    log(f"Proactive: http://127.0.0.1:{PROACTIVE_PORT}/send")
+
+    # Start proactive HTTP server in background
+    http_thread = threading.Thread(target=start_proactive_server, daemon=True)
+    http_thread.start()
 
     marker = load_marker()
     log(f"Marker: {marker}")
@@ -111,7 +279,7 @@ def main():
     while True:
         try:
             data = get_updates(marker)
-            consecutive_errors = 0  # reset on success
+            consecutive_errors = 0
             updates = data.get("updates", [])
             new_marker = data.get("marker", marker)
 
@@ -130,6 +298,9 @@ def main():
                     if sender.get("is_bot") or not text:
                         continue
 
+                    # Map session for future proactive sends
+                    map_session_to_user(f"max-user-{user_id}", user_id)
+
                     log(f"Message from {user_id}: {text[:80]}")
 
                     send_typing(user_id)
@@ -141,7 +312,8 @@ def main():
                         log(f"Sent to MAX ✓")
                     except Exception as e:
                         log(f"OpenClaw error: {e}")
-                        send_to_max(user_id, "⚠️ Извини, я сейчас не могу ответить. Попробуй через минуту.")
+                        send_to_max(user_id,
+                            "⚠️ Извини, я сейчас не могу ответить. Попробуй через минуту.")
 
             if new_marker != marker:
                 marker = new_marker
@@ -150,12 +322,11 @@ def main():
             time.sleep(3)
 
         except requests.exceptions.Timeout:
-            # Long polling timeout — normal
             continue
         except requests.exceptions.ConnectionError as e:
             consecutive_errors += 1
             log(f"Connection error (#{consecutive_errors}): {e}")
-            time.sleep(min(consecutive_errors * 5, 30))  # backoff
+            time.sleep(min(consecutive_errors * 5, 30))
         except Exception as e:
             consecutive_errors += 1
             log(f"Error (#{consecutive_errors}): {e}")
