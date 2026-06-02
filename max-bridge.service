@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=aurum
 WorkingDirectory=/opt/max-bridge
+EnvironmentFile=/opt/max-bridge/.env
 ExecStart=/usr/bin/python3 -u /opt/max-bridge/max-bridge.py
 Restart=always
 RestartSec=10

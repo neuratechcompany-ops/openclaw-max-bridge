@@ -6,14 +6,24 @@ v2.0 — Resilient: retries, auto-reconnect, HTTP server for cron/proactive mess
 import json, time, requests, sys, os, traceback, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ====== CONFIGURE THESE ======
-MAX_TOKEN = "f9LHodD0cOJ0V-P-QgKEC5ePe5jJi7-ReDH7_O3xHtVecNrWoC2xQtRTVlITc4It0RfsdqLjxU_lBnkOyfL6"
-OC_TOKEN  = "c48cbda39360e7bc4c721dda1d06caf05ef6f290b5c7f970"
-PROACTIVE_PORT = 18790  # HTTP server for cron/webhook → MAX delivery
-# =============================
+# ====== CONFIGURE VIA ENVIRONMENT ======
+# export MAX_TOKEN="your_max_bot_token"
+# export OC_TOKEN="your_openclaw_token"
+# export OC_API="http://localhost:18789/v1/chat/completions"  # optional
+MAX_TOKEN = os.environ.get("MAX_TOKEN", "")
+OC_TOKEN  = os.environ.get("OC_TOKEN", "")
+PROACTIVE_PORT = int(os.environ.get("PROACTIVE_PORT", "18790"))
+
+if not MAX_TOKEN or not OC_TOKEN:
+    print("ERROR: MAX_TOKEN and OC_TOKEN environment variables are required.")
+    print("Example:")
+    print("  export MAX_TOKEN='your_max_token'")
+    print("  export OC_TOKEN='your_openclaw_token'")
+    sys.exit(1)
+# =======================================
 
 MAX_API = "https://platform-api.max.ru"
-OC_API = "http://localhost:18789/v1/chat/completions"
+OC_API = os.environ.get("OC_API", "http://localhost:18789/v1/chat/completions")
 
 HEADERS_MAX = {"Authorization": MAX_TOKEN}
 HEADERS_OC = {
@@ -134,6 +144,8 @@ def send_typing(user_id):
 
 # ─── OpenClaw API ─────────────────────────────────────────────
 
+OC_MODEL = os.environ.get("OC_MODEL", "deepseek/deepseek-v4-flash")
+
 def send_to_openclaw(user_id, text):
     """Send to OpenClaw with retry on timeout."""
     session_key = f"max-user-{user_id}"
@@ -145,7 +157,7 @@ def send_to_openclaw(user_id, text):
     }
     headers = dict(HEADERS_OC)
     headers["x-openclaw-session-key"] = session_key
-    headers["x-openclaw-model"] = "deepseek/deepseek-v4-flash"
+    headers["x-openclaw-model"] = OC_MODEL
 
     for attempt in range(3):
         try:

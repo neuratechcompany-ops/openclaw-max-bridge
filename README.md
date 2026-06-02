@@ -25,25 +25,32 @@
 - **Токен MAX** — создай бота на [business.max.ru](https://business.max.ru/self) → «Чат-боты» → скопируй токен в разделе «Интеграция»
 - **Токен OpenClaw** — лежит в файле `~/.openclaw/openclaw.json` в поле `gateway.auth.token`
 
-### 2. Вставь токены в скрипт
+### 2. Создай .env файл с токенами
 
-Открой `max-bridge.py`, найди в начале:
-
-```python
-MAX_TOKEN = "your_m…here"    # ← вставь сюда токен от MAX
-OC_TOKEN  = "your_o…here"    # ← вставь сюда токен OpenClaw
+```bash
+cp .env.example .env
+nano .env  # вставь свои токены
 ```
+
+⚠️ **Никогда не коммить `.env` в git!** Он уже в `.gitignore`.
 
 ### 3. Запусти
 
 ```bash
-python3 -u max-bridge.py
+# Экспортируй токены в окружение:
+export $(cat .env | xargs)
+
+# Запусти:
+python3 max-bridge.py
 ```
 
 Или сразу как сервис (чтобы не падал и сам запускался при включении компа):
 
 ```bash
+sudo mkdir -p /opt/max-bridge
+sudo cp max-bridge.py max-bridge.service .env /opt/max-bridge/
 sudo cp max-bridge.service /etc/systemd/system/
+sudo systemctl daemon-reload
 sudo systemctl enable --now max-bridge
 ```
 
@@ -176,14 +183,14 @@ https://max.ru/@имя_твоего_бота
 
 ### Быстрее или умнее?
 
-По умолчанию бот использует **быструю модель** (отвечает за 5-15 секунд). Если хочешь более глубокие ответы (но ждать до минуты) — замени в скрипте:
+По умолчанию бот использует **быструю модель** (отвечает за 5-15 секунд). Если хочешь более глубокие ответы (но ждать до минуты) — добавь в `.env`:
 
-```python
+```bash
 # Быстро (по умолчанию):
-headers["x-openclaw-model"] = "deepseek/deepseek-v4-flash"
+OC_MODEL=deepseek/deepseek-v4-flash
 
 # Умно (медленнее):
-headers["x-openclaw-model"] = "deepseek/deepseek-v4-pro"
+OC_MODEL=deepseek/deepseek-v4-pro
 ```
 
 ### Если бот молчит
